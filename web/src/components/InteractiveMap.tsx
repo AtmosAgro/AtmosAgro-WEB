@@ -6,6 +6,8 @@ import {
     Activity,
     ArrowUpRight,
     Droplets,
+    Eye,
+    ImageIcon,
     Layers,
     Maximize2,
     Sprout,
@@ -23,6 +25,13 @@ import * as L from "leaflet";
 import proj4 from "proj4";
 import { listPropriedades, getPropriedade, Propriedade } from "@/services/propriedades";
 import { Talhao, GeoJSONFeature, listTalhoes, getTalhao } from "@/services/talhoes";
+import {
+    Artefato,
+    listArtefatosByPropriedade,
+    getArtefatoSignedUrl,
+    formatArtefatoLabel,
+    getIndice,
+} from "@/services/artefatos";
 import { dataCache } from "@/services/dataCache";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
@@ -286,6 +295,11 @@ export default function InteractiveMap() {
 
     const [mapRef, setMapRef] = useState<L.Map | null>(null);
 
+    // Artefatos (imagens de satélite da API)
+    const [artefatos, setArtefatos] = useState<Artefato[]>([]);
+    const [isLoadingArtefatos, setIsLoadingArtefatos] = useState(false);
+    const [activeArtefatoId, setActiveArtefatoId] = useState<string | null>(null);
+
     // TIFF State
     const [tiffLayer, setTiffLayer] = useState<L.Layer & { options?: { georaster?: Georaster } } | null>(null);
     const [georasterData, setGeorasterData] = useState<Georaster | null>(null); // Store raw data for inspection
@@ -297,108 +311,135 @@ export default function InteractiveMap() {
     const [hoverPos, setHoverPos] = useState<{ x: number, y: number } | null>(null);
 
 
+    // TIFF Helpers — lógica de colormap compartilhada entre upload local e carregamento via API
+    const buildGeoRasterLayer = (georaster: Georaster) => {
+        const rasterStats = getRasterStats(georaster);
+
+        const isNoDataValue = (value: number, bandIndex: number) => {
+            const noDataValue = resolveNoDataValue(rasterStats.noDataValue, bandIndex);
+            return noDataValue !== null && value === noDataValue;
+        };
+
+        const scaleTo8Bit = (value: number, bandIndex: number) => {
+            if (typeof value !== "number" || !Number.isFinite(value) || isNoDataValue(value, bandIndex)) {
+                return null;
+            }
+            const { min, max } = resolveBandMinMax(rasterStats, bandIndex);
+            const normalized = normalizeValue(value, min, max);
+            if (normalized === null) return null;
+            return Math.round(normalized * 255);
+        };
+
+        return new GeoRasterLayer({
+            georaster,
+            opacity: 0.7,
+            resolution: 96,
+            pixelValuesToColorFn: (values: number[]) => {
+                if (!Array.isArray(values) || values.length === 0) return null;
+
+                // RGB (true color)
+                if (rasterStats.numberOfRasters >= 3 && values.length >= 3) {
+                    const r = scaleTo8Bit(values[0], 0);
+                    const g = scaleTo8Bit(values[1], 1);
+                    const b = scaleTo8Bit(values[2], 2);
+                    if (r === null || g === null || b === null) return null;
+                    return `rgb(${r}, ${g}, ${b})`;
+                }
+
+                // Índice single-band (NDVI, NDWI, etc.)
+                const value = values[0];
+                if (typeof value !== "number" || !Number.isFinite(value) || isNoDataValue(value, 0)) return null;
+                if (value === 0) return null;
+
+                let { min, max } = resolveBandMinMax(rasterStats, 0);
+                // Heurística: força escala 0–1 para índices float quando metadados são inconsistentes
+                if (max > 1.5 && value >= -1.0 && value <= 1.0) { min = 0; max = 1; }
+
+                const normalized = normalizeValue(value, min, max);
+                if (normalized === null) return null;
+
+                if (normalized < 0.2) return "#d7191c";
+                if (normalized < 0.4) return "#fdae61";
+                if (normalized < 0.6) return "#ffffbf";
+                if (normalized < 0.8) return "#a6d96a";
+                return "#1a9641";
+            },
+        });
+    };
+
+    const applyTiffLayer = (georaster: Georaster) => {
+        if (!mapRef) return;
+        if (tiffLayer) mapRef.removeLayer(tiffLayer);
+        const layer = buildGeoRasterLayer(georaster);
+        layer.addTo(mapRef);
+        setTiffLayer(layer);
+        setGeorasterData(georaster);
+        mapRef.fitBounds(layer.getBounds());
+    };
+
     // TIFF Handlers
     const handleTiffUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
         if (!file || !mapRef) return;
 
         setIsTiffLoading(true);
+        setActiveArtefatoId(null);
         ensureProj4();
 
         try {
             const arrayBuffer = await file.arrayBuffer();
             let georaster = await parseGeoraster(arrayBuffer);
 
-            // Apply Mask if property boundary exists
-            if (selectedPropertyDetails && selectedPropertyDetails.geojson) {
+            if (selectedPropertyDetails?.geojson) {
                 georaster = maskGeoraster(georaster, selectedPropertyDetails.geojson);
             }
 
-            setGeorasterData(georaster); // Save for TiffHoverHandler
-            const rasterStats = getRasterStats(georaster);
-
-            const isNoDataValue = (value: number, bandIndex: number) => {
-                const noDataValue = resolveNoDataValue(rasterStats.noDataValue, bandIndex);
-                return noDataValue !== null && value === noDataValue;
-            };
-
-            const scaleTo8Bit = (value: number, bandIndex: number) => {
-                if (typeof value !== "number" || !Number.isFinite(value) || isNoDataValue(value, bandIndex)) {
-                    return null;
-                }
-                const { min, max } = resolveBandMinMax(rasterStats, bandIndex);
-                const normalized = normalizeValue(value, min, max);
-                if (normalized === null) return null;
-                return Math.round(normalized * 255);
-            };
-
-            // Remove previous layer if exists
-            if (tiffLayer) {
-                mapRef.removeLayer(tiffLayer);
-            }
-
-            const layer = new GeoRasterLayer({
-                georaster: georaster,
-                opacity: 0.7,
-                resolution: 96, // DPI
-                pixelValuesToColorFn: (values: number[]) => {
-                    if (!Array.isArray(values) || values.length === 0) return null;
-
-                    if (rasterStats.numberOfRasters >= 3 && values.length >= 3) {
-                        const r = scaleTo8Bit(values[0], 0);
-                        const g = scaleTo8Bit(values[1], 1);
-                        const b = scaleTo8Bit(values[2], 2);
-                        if (r === null || g === null || b === null) return null;
-                        return `rgb(${r}, ${g}, ${b})`;
-                    }
-
-                    const value = values[0];
-                    if (typeof value !== "number" || !Number.isFinite(value) || isNoDataValue(value, 0)) return null;
-                    if (value === 0) return null; // Hard filter for 0 values to remove background artifacts
-
-                    // Robust scaling for NDVI (usually -1 to 1)
-                    // If metadata claims a Huge max (e.g. 24 or 255) but values are small float, ignore metadata
-                    let { min, max } = resolveBandMinMax(rasterStats, 0);
-
-                    // Heuristic: If max is > 1.2 but our value is small (< 1.2), and it's a float, 
-                    // it's likely an NDVI with bad metadata or outlier pixels.
-                    // We force the scale to be roughly 0 to 1 for better contrast.
-                    if (max > 1.5 && value >= -1.0 && value <= 1.0) {
-                        min = 0;
-                        max = 1;
-                    }
-
-                    const normalized = normalizeValue(value, min, max);
-
-                    // DEBUG: Log first few pixels to debug color scale
-                    // @ts-expect-error window prop
-                    if (!window.tiffDebugLogged) {
-                        console.log("[TIFF Color Debug]", { value, min, max, normalized });
-                        // @ts-expect-error window prop
-                        window.tiffDebugLogged = true;
-                    }
-
-                    if (normalized === null) return null;
-
-                    if (normalized < 0.2) return "#d7191c"; // Red (Low)
-                    if (normalized < 0.4) return "#fdae61"; // Orange
-                    if (normalized < 0.6) return "#ffffbf"; // Yellow
-                    if (normalized < 0.8) return "#a6d96a"; // Light Green
-                    return "#1a9641"; // Dark Green (High)
-                }
-            });
-
-            layer.addTo(mapRef);
-            setTiffLayer(layer);
-            mapRef.fitBounds(layer.getBounds());
+            applyTiffLayer(georaster);
         } catch (error) {
             console.error("Error loading GeoTIFF:", error);
             alert("Erro ao carregar o arquivo GeoTIFF. Verifique se o formato é válido.");
         } finally {
             setIsTiffLoading(false);
-            if (fileInputRef.current) {
-                fileInputRef.current.value = "";
+            if (fileInputRef.current) fileInputRef.current.value = "";
+        }
+    };
+
+    /**
+     * Carrega um GeoTIFF de um Artefato via Signed URL do GCS.
+     * Se o mesmo artefato já estiver ativo, desmarca e remove a camada.
+     */
+    const loadArtefatoTiff = async (artefato: Artefato) => {
+        if (!mapRef) return;
+
+        if (activeArtefatoId === artefato.id && tiffLayer) {
+            clearTiff();
+            return;
+        }
+
+        setIsTiffLoading(true);
+        setActiveArtefatoId(artefato.id);
+        ensureProj4();
+
+        try {
+            const { signedUrl } = await getArtefatoSignedUrl(artefato.id);
+
+            const response = await fetch(signedUrl);
+            if (!response.ok) throw new Error(`Erro ao baixar TIFF: ${response.status}`);
+            const arrayBuffer = await response.arrayBuffer();
+
+            let georaster = await parseGeoraster(arrayBuffer);
+
+            if (selectedPropertyDetails?.geojson) {
+                georaster = maskGeoraster(georaster, selectedPropertyDetails.geojson);
             }
+
+            applyTiffLayer(georaster);
+        } catch (error) {
+            console.error("Error loading artefato TIFF:", error);
+            alert("Erro ao carregar a imagem de satélite. Tente novamente.");
+            setActiveArtefatoId(null);
+        } finally {
+            setIsTiffLoading(false);
         }
     };
 
@@ -406,7 +447,9 @@ export default function InteractiveMap() {
         if (mapRef && tiffLayer) {
             mapRef.removeLayer(tiffLayer);
             setTiffLayer(null);
+            setGeorasterData(null);
         }
+        setActiveArtefatoId(null);
     };
 
     // Load properties on mount
@@ -547,10 +590,30 @@ export default function InteractiveMap() {
     }, [selectedTalhaoId]);
     */
 
+    // Carrega artefatos disponíveis ao trocar de propriedade
+    useEffect(() => {
+        async function fetchArtefatos() {
+            if (!selectedPropertyId) {
+                setArtefatos([]);
+                return;
+            }
+            setIsLoadingArtefatos(true);
+            try {
+                const data = await listArtefatosByPropriedade(selectedPropertyId);
+                setArtefatos(data);
+            } catch {
+                setArtefatos([]);
+            } finally {
+                setIsLoadingArtefatos(false);
+            }
+        }
+        fetchArtefatos();
+        // Limpa TIFF ativo ao trocar de propriedade
+        clearTiff();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedPropertyId]);
+
     // Derived state
-    // selectedProperty is unused if we check cache only, but might be useful for titles?
-    // Actually selectedProperty variable was marked unused.
-    // const selectedProperty = useMemo(() => properties.find(p => p.id === selectedPropertyId), [properties, selectedPropertyId]);
     const selectedTalhao = useMemo(() => talhoes.find(t => t.id === selectedTalhaoId), [talhoes, selectedTalhaoId]);
 
     // Helper to extract polygon positions from GeoJSON
@@ -617,15 +680,25 @@ export default function InteractiveMap() {
                         <div className="space-y-6">
                             {/* Overall Health */}
                             <div>
-                                <p className="text-sm font-medium text-slate-500">Saúde geral (índices)</p>
+                                <p className="text-sm font-medium text-slate-500">Imagens de satélite</p>
                                 <div className="mt-2 flex items-center gap-3">
-                                    <Badge className="bg-slate-200 hover:bg-slate-200 text-slate-500 rounded-full px-3 py-1 text-xs font-normal">
-                                        Sem dados de satélite
-                                    </Badge>
+                                    {isLoadingArtefatos ? (
+                                        <Skeleton className="h-6 w-32 rounded-full bg-slate-200" />
+                                    ) : artefatos.length > 0 ? (
+                                        <Badge className="bg-emerald-100 hover:bg-emerald-100 text-emerald-700 rounded-full px-3 py-1 text-xs font-normal">
+                                            {artefatos.length} {artefatos.length === 1 ? "imagem disponível" : "imagens disponíveis"}
+                                        </Badge>
+                                    ) : (
+                                        <Badge className="bg-slate-200 hover:bg-slate-200 text-slate-500 rounded-full px-3 py-1 text-xs font-normal">
+                                            Sem imagens processadas
+                                        </Badge>
+                                    )}
                                 </div>
                                 <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
                                     <Scan className="h-3.5 w-3.5" />
-                                    Faça upload de um TIFF para análise
+                                    {activeArtefatoId
+                                        ? "Imagem carregada no mapa"
+                                        : "Selecione um talhão para visualizar"}
                                 </div>
                             </div>
                             {/* Fields List */}
@@ -797,7 +870,13 @@ export default function InteractiveMap() {
                             top: hoverPos.y - 20, // Offset to top
                         }}
                     >
-                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">ÍNDICE (NDVI)</p>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            {activeArtefatoId
+                                ? (artefatos.find(a => a.id === activeArtefatoId)
+                                    ? getIndice(artefatos.find(a => a.id === activeArtefatoId)!)
+                                    : "ÍNDICE")
+                                : "ÍNDICE"}
+                        </p>
                         <p className="text-lg font-bold text-emerald-400">
                             {hoverValue.toFixed(2)}
                         </p>
@@ -938,24 +1017,70 @@ export default function InteractiveMap() {
                                     </div>
                                 </div>
 
-                                {/* Análise de satélite — aguardando dados */}
+                                {/* Imagens de satélite disponíveis */}
                                 <div className="rounded-xl border border-slate-200 bg-white p-3">
-                                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-3">Análise de Satélite</p>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        {[
-                                            { label: "Saúde (NDVI)", icon: <Activity className="h-3 w-3" /> },
-                                            { label: "Risco SMC", icon: <Droplets className="h-3 w-3" /> },
-                                            { label: "NDVI", icon: <Sprout className="h-3 w-3" /> },
-                                            { label: "EVI", icon: <Layers className="h-3 w-3" /> },
-                                        ].map(({ label, icon }) => (
-                                            <div key={label} className="rounded-lg bg-slate-50 px-3 py-2 space-y-1">
-                                                <div className="flex items-center gap-1 text-[10px] text-slate-400">
-                                                    {icon} {label}
-                                                </div>
-                                                <p className="text-xs font-semibold text-slate-400">Sem dados</p>
-                                            </div>
-                                        ))}
+                                    <div className="flex items-center justify-between mb-3">
+                                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                            Imagens Disponíveis
+                                        </p>
+                                        {artefatos.length > 0 && (
+                                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-600">
+                                                {artefatos.length}
+                                            </span>
+                                        )}
                                     </div>
+
+                                    {isLoadingArtefatos ? (
+                                        <div className="space-y-2">
+                                            {[1, 2].map((i) => (
+                                                <Skeleton key={i} className="h-9 w-full rounded-lg bg-slate-100" />
+                                            ))}
+                                        </div>
+                                    ) : artefatos.length === 0 ? (
+                                        <div className="flex flex-col items-center gap-1 py-3 text-center">
+                                            <Scan className="h-4 w-4 text-slate-300" />
+                                            <p className="text-xs text-slate-400">Nenhuma imagem processada</p>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-1.5">
+                                            {artefatos.map((art) => {
+                                                const isActive = activeArtefatoId === art.id;
+                                                const isThisLoading = isTiffLoading && activeArtefatoId === art.id;
+                                                return (
+                                                    <button
+                                                        key={art.id}
+                                                        onClick={() => loadArtefatoTiff(art)}
+                                                        disabled={isTiffLoading && !isThisLoading}
+                                                        className={`group w-full flex items-center justify-between rounded-lg px-3 py-2 text-left text-xs transition-all ${
+                                                            isActive
+                                                                ? "bg-emerald-500 text-white shadow-sm"
+                                                                : "bg-slate-50 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center gap-2 min-w-0">
+                                                            <span className={`rounded px-1.5 py-0.5 font-bold text-[10px] ${
+                                                                isActive ? "bg-white/20 text-white" : "bg-slate-200 text-slate-600"
+                                                            }`}>
+                                                                {getIndice(art)}
+                                                            </span>
+                                                            <span className="truncate font-medium">
+                                                                {formatArtefatoLabel(art)}
+                                                            </span>
+                                                        </div>
+                                                        <span className="ml-2 flex-shrink-0">
+                                                            {isThisLoading ? (
+                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                            ) : isActive ? (
+                                                                <Eye className="h-3.5 w-3.5" />
+                                                            ) : (
+                                                                <ImageIcon className="h-3.5 w-3.5 opacity-30 group-hover:opacity-60" />
+                                                            )}
+                                                        </span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* Clima & Solo — aguardando dados */}
