@@ -18,7 +18,10 @@ import {
     Plus,
     Upload,
     Trash2,
-    Loader2
+    Loader2,
+    Calendar,
+    RefreshCw,
+    CheckCircle2,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import * as L from "leaflet";
@@ -32,6 +35,7 @@ import {
     formatArtefatoLabel,
     getIndice,
 } from "@/services/artefatos";
+import { createJob, getJob, JobResponse } from "@/services/jobs";
 import { dataCache } from "@/services/dataCache";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
@@ -275,13 +279,26 @@ const maskGeoraster = (georaster: Georaster, polygonGeoJson: GeoJSONFeature) => 
     }
 };
 
-const layerOptions = ["NDVI", "EVI", "NDRE", "NDMI", "True Color"];
+type LayerOption = { label: string; key: string };
+const layerOptions: LayerOption[] = [
+    { label: "NDVI", key: "ndvi" },
+    { label: "NDWI", key: "ndwi" },
+    { label: "EVI", key: "evi" },
+    { label: "NDRE", key: "ndre" },
+    { label: "NDMI", key: "ndmi" },
+    { label: "GNDVI", key: "gndvi" },
+    { label: "True Color", key: "truecolor" },
+];
+const DEFAULT_JOB_INDICES = ["ndvi", "ndwi", "evi", "ndre", "ndmi", "gndvi"];
 
 export default function InteractiveMap() {
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [detailPanelOpen, setDetailPanelOpen] = useState(false);
-    const [activeLayer, setActiveLayer] = useState(layerOptions[0]);
-    const [layerMenuOpen, setLayerMenuOpen] = useState(false);
+    const [activeLayer, setActiveLayer] = useState<LayerOption>(layerOptions[0]);
+    const [openMenu, setOpenMenu] = useState<"calendar" | "layers" | null>(null);
+
+    const toggleMenu = (menu: "calendar" | "layers") =>
+        setOpenMenu((prev) => (prev === menu ? null : menu));
     const showPanels = !isFullscreen;
 
     // Real data state
@@ -300,6 +317,13 @@ export default function InteractiveMap() {
     const [isLoadingArtefatos, setIsLoadingArtefatos] = useState(false);
     const [activeArtefatoId, setActiveArtefatoId] = useState<string | null>(null);
 
+    // Filtro de data — uma única data
+    const [selectedDate, setSelectedDate] = useState("");
+
+    // Job de processamento
+    const [activeJob, setActiveJob] = useState<JobResponse | null>(null);
+    const [isCreatingJob, setIsCreatingJob] = useState(false);
+
     // TIFF State
     const [tiffLayer, setTiffLayer] = useState<L.Layer & { options?: { georaster?: Georaster } } | null>(null);
     const [georasterData, setGeorasterData] = useState<Georaster | null>(null); // Store raw data for inspection
@@ -310,6 +334,15 @@ export default function InteractiveMap() {
     const [hoverValue, setHoverValue] = useState<number | null>(null);
     const [hoverPos, setHoverPos] = useState<{ x: number, y: number } | null>(null);
 
+
+    // Constrói um FeatureCollection com os polígonos dos talhões, usado como máscara do raster.
+    const buildTalhoesMask = (): object | undefined => {
+        const features = talhoes
+            .map((t) => t.geojson)
+            .filter((g): g is GeoJSONFeature => !!g && !!g.geometry);
+        if (features.length === 0) return undefined;
+        return { type: "FeatureCollection", features };
+    };
 
     // TIFF Helpers — lógica de colormap compartilhada entre upload local e carregamento via API
     const buildGeoRasterLayer = (georaster: Georaster) => {
@@ -330,10 +363,18 @@ export default function InteractiveMap() {
             return Math.round(normalized * 255);
         };
 
+        const mask = buildTalhoesMask();
+
         return new GeoRasterLayer({
             georaster,
-            opacity: 0.7,
-            resolution: 96,
+            opacity: 0.85,
+            resolution: 128,
+            resampleMethod: "bilinear",
+            ...(mask && {
+                mask,
+                mask_strategy: "outside" as const,
+                mask_srs: "EPSG:4326",
+            }),
             pixelValuesToColorFn: (values: number[]) => {
                 if (!Array.isArray(values) || values.length === 0) return null;
 
@@ -351,9 +392,27 @@ export default function InteractiveMap() {
                 if (typeof value !== "number" || !Number.isFinite(value) || isNoDataValue(value, 0)) return null;
                 if (value === 0) return null;
 
-                let { min, max } = resolveBandMinMax(rasterStats, 0);
-                // Heurística: força escala 0–1 para índices float quando metadados são inconsistentes
-                if (max > 1.5 && value >= -1.0 && value <= 1.0) { min = 0; max = 1; }
+                // Escala fixa baseada no índice ativo (faixa biológica/agronômica real),
+                // evitando que a normalização min/max distorça a interpretação das cores.
+                const FIXED_RANGES: Record<string, [number, number]> = {
+                    ndvi:  [0.2, 0.9],
+                    ndre:  [0.1, 0.5],
+                    gndvi: [0.2, 0.7],
+                    evi:   [0.2, 0.8],
+                    ndwi:  [-0.2, 0.4],
+                    ndmi:  [-0.2, 0.5],
+                };
+                let min: number;
+                let max: number;
+                const fixed = FIXED_RANGES[activeLayer.key];
+                if (fixed) {
+                    [min, max] = fixed;
+                } else {
+                    const dyn = resolveBandMinMax(rasterStats, 0);
+                    min = dyn.min;
+                    max = dyn.max;
+                    if (max > 1.5 && value >= -1.0 && value <= 1.0) { min = 0; max = 1; }
+                }
 
                 const normalized = normalizeValue(value, min, max);
                 if (normalized === null) return null;
@@ -388,12 +447,7 @@ export default function InteractiveMap() {
 
         try {
             const arrayBuffer = await file.arrayBuffer();
-            let georaster = await parseGeoraster(arrayBuffer);
-
-            if (selectedPropertyDetails?.geojson) {
-                georaster = maskGeoraster(georaster, selectedPropertyDetails.geojson);
-            }
-
+            const georaster = await parseGeoraster(arrayBuffer);
             applyTiffLayer(georaster);
         } catch (error) {
             console.error("Error loading GeoTIFF:", error);
@@ -427,12 +481,7 @@ export default function InteractiveMap() {
             if (!response.ok) throw new Error(`Erro ao baixar TIFF: ${response.status}`);
             const arrayBuffer = await response.arrayBuffer();
 
-            let georaster = await parseGeoraster(arrayBuffer);
-
-            if (selectedPropertyDetails?.geojson) {
-                georaster = maskGeoraster(georaster, selectedPropertyDetails.geojson);
-            }
-
+            const georaster = await parseGeoraster(arrayBuffer);
             applyTiffLayer(georaster);
         } catch (error) {
             console.error("Error loading artefato TIFF:", error);
@@ -615,6 +664,85 @@ export default function InteractiveMap() {
 
     // Derived state
     const selectedTalhao = useMemo(() => talhoes.find(t => t.id === selectedTalhaoId), [talhoes, selectedTalhaoId]);
+
+    const filteredArtefatos = useMemo(() => {
+        if (!selectedDate) return artefatos;
+        return artefatos.filter((a) => a.dataReferencia?.slice(0, 10) === selectedDate);
+    }, [artefatos, selectedDate]);
+
+    // Conjunto de índices (lowercase) disponíveis para a data selecionada
+    const availableIndices = useMemo(() => {
+        const set = new Set<string>();
+        for (const a of filteredArtefatos) {
+            const idx = getIndice(a).toLowerCase();
+            if (idx) set.add(idx);
+        }
+        return set;
+    }, [filteredArtefatos]);
+
+    const hasDateFilter = !!selectedDate;
+    const noImagesInPeriod = hasDateFilter && filteredArtefatos.length === 0;
+
+    // Auto-carregamento: quando data + índice estiverem definidos e houver artefato correspondente,
+    // carrega no mapa. Se a combinação mudar e não houver artefato, limpa.
+    useEffect(() => {
+        if (!selectedDate || !activeLayer) return;
+        const layerKey = activeLayer.key;
+        const match = filteredArtefatos.find((a) => getIndice(a).toLowerCase() === layerKey);
+        if (match) {
+            if (activeArtefatoId !== match.id) {
+                loadArtefatoTiff(match);
+            }
+        } else if (tiffLayer) {
+            clearTiff();
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedDate, activeLayer, filteredArtefatos]);
+
+    // Polling do job ativo
+    useEffect(() => {
+        if (!activeJob || activeJob.status === "succeeded" || activeJob.status === "failed") return;
+        const interval = setInterval(async () => {
+            try {
+                const updated = await getJob(activeJob.id);
+                setActiveJob(updated);
+                if (updated.status === "succeeded") {
+                    // Recarrega artefatos após job concluído
+                    if (selectedPropertyId) {
+                        const data = await listArtefatosByPropriedade(selectedPropertyId);
+                        setArtefatos(data);
+                    }
+                }
+            } catch {
+                // silent
+            }
+        }, 5000);
+        return () => clearInterval(interval);
+    }, [activeJob, selectedPropertyId]);
+
+    const handleSolicitarProcessamento = async () => {
+        if (!selectedPropertyId || !selectedDate) return;
+        setIsCreatingJob(true);
+        try {
+            // Sentinel-2 tem revisita de ~5 dias; buscamos ±7 dias ao redor da data escolhida
+            const base = new Date(selectedDate + "T00:00:00");
+            const start = new Date(base);
+            start.setDate(start.getDate() - 7);
+            const end = new Date(base);
+            end.setDate(end.getDate() + 7);
+            const toIso = (d: Date) => d.toISOString().slice(0, 10);
+            const job = await createJob(
+                selectedPropertyId,
+                { start: toIso(start), end: toIso(end) },
+                DEFAULT_JOB_INDICES
+            );
+            setActiveJob(job);
+        } catch {
+            alert("Erro ao solicitar processamento. Tente novamente.");
+        } finally {
+            setIsCreatingJob(false);
+        }
+    };
 
     // Helper to extract polygon positions from GeoJSON
 
@@ -816,8 +944,8 @@ export default function InteractiveMap() {
                                 pathOptions={{
                                     color: talhao.id === selectedTalhaoId ? "#ffffff" : "#10b981",
                                     fillColor: "#10b981", // Emerald 500
-                                    fillOpacity: talhao.id === selectedTalhaoId ? 0.3 : 0.5,
-                                    weight: talhao.id === selectedTalhaoId ? 3 : 1,
+                                    fillOpacity: tiffLayer ? 0 : (talhao.id === selectedTalhaoId ? 0.3 : 0.5),
+                                    weight: talhao.id === selectedTalhaoId ? 3 : (tiffLayer ? 2 : 1),
                                 }}
                                 eventHandlers={{
                                     click: (e) => {
@@ -918,26 +1046,147 @@ export default function InteractiveMap() {
                     <div className="relative pointer-events-auto">
                         <button
                             className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-900/60 text-white backdrop-blur-md ring-1 ring-white/10 transition hover:bg-slate-900/80"
-                            onClick={() => setLayerMenuOpen((prev) => !prev)}
+                            onClick={() => toggleMenu("layers")}
                             aria-label="Selecionar camada do mapa"
                         >
                             <Layers className="h-5 w-5" />
                         </button>
-                        {layerMenuOpen && (
-                            <div className="absolute bottom-14 left-0 w-40 rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_16px_30px_rgba(0,0,0,0.18)]">
-                                {layerOptions.map((layer) => (
-                                    <button
-                                        key={layer}
-                                        className={`w-full rounded-xl px-3 py-2 text-left text-sm font-semibold transition ${activeLayer === layer ? "bg-slate-900 text-white" : "bg-white text-slate-800 hover:bg-slate-50"
-                                            }`}
-                                        onClick={() => {
-                                            setActiveLayer(layer);
-                                            setLayerMenuOpen(false);
-                                        }}
-                                    >
-                                        {layer}
-                                    </button>
-                                ))}
+                        {openMenu === "layers" && (
+                            <div className="absolute bottom-14 left-0 w-64 rounded-2xl border border-slate-200 bg-white p-3 shadow-[0_16px_30px_rgba(0,0,0,0.18)]">
+                                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2 px-1">
+                                    Índices disponíveis
+                                </p>
+                                {!hasDateFilter && (
+                                    <p className="text-[10px] text-slate-400 mb-2 px-1">
+                                        Selecione uma data no calendário primeiro.
+                                    </p>
+                                )}
+                                <div className="space-y-1">
+                                    {layerOptions.map((layer) => {
+                                        const isAvailable = layer.key === "truecolor"
+                                            ? false
+                                            : hasDateFilter && availableIndices.has(layer.key);
+                                        const isActive = activeLayer.key === layer.key;
+                                        const isPending = activeJob && (activeJob.status === "pending" || activeJob.status === "running");
+                                        const isClickable = isAvailable;
+                                        return (
+                                            <button
+                                                key={layer.key}
+                                                disabled={!isClickable}
+                                                className={`w-full flex items-center justify-between rounded-xl px-3 py-2 text-sm font-medium transition ${
+                                                    isActive
+                                                        ? "bg-slate-900 text-white"
+                                                        : isAvailable
+                                                            ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                                                            : "bg-slate-50 text-slate-400 disabled:cursor-not-allowed disabled:opacity-60"
+                                                }`}
+                                                onClick={() => {
+                                                    setActiveLayer(layer);
+                                                    setOpenMenu(null);
+                                                }}
+                                            >
+                                                <span>{layer.label}</span>
+                                                {layer.key === "truecolor" ? (
+                                                    <span className="text-[9px] uppercase tracking-wider opacity-50">em breve</span>
+                                                ) : isAvailable ? (
+                                                    <CheckCircle2 className={`h-3.5 w-3.5 ${isActive ? "text-white" : "text-emerald-500"}`} />
+                                                ) : hasDateFilter ? (
+                                                    <span className="text-[9px] uppercase tracking-wider opacity-60">
+                                                        {isPending ? "processando" : "indisponível"}
+                                                    </span>
+                                                ) : null}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Calendário — seleção de data + dispatch de job quando não há imagem */}
+                    <div className="relative pointer-events-auto">
+                        <button
+                            className={`flex h-12 w-12 items-center justify-center rounded-2xl backdrop-blur-md ring-1 ring-white/10 transition ${
+                                activeJob && (activeJob.status === "pending" || activeJob.status === "running")
+                                    ? "bg-amber-500/80 text-white hover:bg-amber-600/80"
+                                    : "bg-slate-900/60 text-white hover:bg-slate-900/80"
+                            }`}
+                            onClick={() => toggleMenu("calendar")}
+                            aria-label="Imagens por data"
+                            title="Imagens por data"
+                        >
+                            {activeJob && (activeJob.status === "pending" || activeJob.status === "running") ? (
+                                <Loader2 className="h-5 w-5 animate-spin" />
+                            ) : (
+                                <Calendar className="h-5 w-5" />
+                            )}
+                        </button>
+                        {openMenu === "calendar" && (
+                            <div className="absolute bottom-14 left-0 w-72 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_16px_30px_rgba(0,0,0,0.18)]">
+                                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-3">
+                                    Data da imagem
+                                </p>
+
+                                <div className="mb-3 space-y-1.5">
+                                    <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                                        <Calendar className="h-3 w-3" />
+                                        <span>Selecione a data</span>
+                                    </div>
+                                    <input
+                                        type="date"
+                                        value={selectedDate}
+                                        onChange={(e) => setSelectedDate(e.target.value)}
+                                        className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                                    />
+                                </div>
+
+                                {/* Estado 1: data com imagens disponíveis */}
+                                {hasDateFilter && filteredArtefatos.length > 0 && (
+                                    <p className="text-[10px] text-slate-400 mt-2">
+                                        {filteredArtefatos.length} {filteredArtefatos.length === 1 ? "índice processado" : "índices processados"} para esta data. Selecione um em <span className="font-semibold">Camadas</span> para visualizar.
+                                    </p>
+                                )}
+
+                                {/* Estado 2: data sem imagens — CTA processar / status do job */}
+                                {noImagesInPeriod && (
+                                    <div className="flex flex-col items-center gap-2 py-2 text-center">
+                                        <Scan className="h-4 w-4 text-slate-300" />
+                                        <p className="text-xs text-slate-400">Nenhuma imagem processada para esta data</p>
+                                        {activeJob && (activeJob.status === "pending" || activeJob.status === "running") ? (
+                                            <div className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 w-full justify-center">
+                                                <Loader2 className="h-3 w-3 animate-spin" />
+                                                <span>
+                                                    {activeJob.status === "pending" ? "Na fila..." : "Processando..."}
+                                                </span>
+                                            </div>
+                                        ) : activeJob?.status === "failed" ? (
+                                            <div className="w-full space-y-1.5">
+                                                <p className="text-[10px] text-red-400">Falhou: {activeJob.erroMensagem}</p>
+                                                <button
+                                                    onClick={handleSolicitarProcessamento}
+                                                    disabled={isCreatingJob}
+                                                    className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:opacity-50"
+                                                >
+                                                    <RefreshCw className="h-3 w-3" />
+                                                    Tentar novamente
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <button
+                                                onClick={handleSolicitarProcessamento}
+                                                disabled={isCreatingJob || !selectedDate}
+                                                className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-50"
+                                            >
+                                                {isCreatingJob ? (
+                                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                                ) : (
+                                                    <RefreshCw className="h-3 w-3" />
+                                                )}
+                                                Iniciar processamento
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -1017,71 +1266,6 @@ export default function InteractiveMap() {
                                     </div>
                                 </div>
 
-                                {/* Imagens de satélite disponíveis */}
-                                <div className="rounded-xl border border-slate-200 bg-white p-3">
-                                    <div className="flex items-center justify-between mb-3">
-                                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                            Imagens Disponíveis
-                                        </p>
-                                        {artefatos.length > 0 && (
-                                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-600">
-                                                {artefatos.length}
-                                            </span>
-                                        )}
-                                    </div>
-
-                                    {isLoadingArtefatos ? (
-                                        <div className="space-y-2">
-                                            {[1, 2].map((i) => (
-                                                <Skeleton key={i} className="h-9 w-full rounded-lg bg-slate-100" />
-                                            ))}
-                                        </div>
-                                    ) : artefatos.length === 0 ? (
-                                        <div className="flex flex-col items-center gap-1 py-3 text-center">
-                                            <Scan className="h-4 w-4 text-slate-300" />
-                                            <p className="text-xs text-slate-400">Nenhuma imagem processada</p>
-                                        </div>
-                                    ) : (
-                                        <div className="space-y-1.5">
-                                            {artefatos.map((art) => {
-                                                const isActive = activeArtefatoId === art.id;
-                                                const isThisLoading = isTiffLoading && activeArtefatoId === art.id;
-                                                return (
-                                                    <button
-                                                        key={art.id}
-                                                        onClick={() => loadArtefatoTiff(art)}
-                                                        disabled={isTiffLoading && !isThisLoading}
-                                                        className={`group w-full flex items-center justify-between rounded-lg px-3 py-2 text-left text-xs transition-all ${
-                                                            isActive
-                                                                ? "bg-emerald-500 text-white shadow-sm"
-                                                                : "bg-slate-50 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                                                        }`}
-                                                    >
-                                                        <div className="flex items-center gap-2 min-w-0">
-                                                            <span className={`rounded px-1.5 py-0.5 font-bold text-[10px] ${
-                                                                isActive ? "bg-white/20 text-white" : "bg-slate-200 text-slate-600"
-                                                            }`}>
-                                                                {getIndice(art)}
-                                                            </span>
-                                                            <span className="truncate font-medium">
-                                                                {formatArtefatoLabel(art)}
-                                                            </span>
-                                                        </div>
-                                                        <span className="ml-2 flex-shrink-0">
-                                                            {isThisLoading ? (
-                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                            ) : isActive ? (
-                                                                <Eye className="h-3.5 w-3.5" />
-                                                            ) : (
-                                                                <ImageIcon className="h-3.5 w-3.5 opacity-30 group-hover:opacity-60" />
-                                                            )}
-                                                        </span>
-                                                    </button>
-                                                );
-                                            })}
-                                        </div>
-                                    )}
-                                </div>
 
                                 {/* Clima & Solo — aguardando dados */}
                                 <div className="grid grid-cols-4 gap-2 text-sm">

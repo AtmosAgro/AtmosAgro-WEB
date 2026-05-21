@@ -1,7 +1,8 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect } from "react";
+import type { AuthUser } from "@/services/auth";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
@@ -74,8 +75,13 @@ const utilityItems = [
 export const Layout = ({ title, description, headerActions, headerBackLink, children, hideChrome }: LayoutProps) => {
   const pathname = usePathname();
   const router = useRouter();
-  const currentUser = getAuthSession();
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [themeMode, setThemeMode] = useState<"light" | "dark">("light");
+
+  // Lê a sessão só no cliente para evitar hydration mismatch (localStorage não existe no SSR)
+  useEffect(() => {
+    setCurrentUser(getAuthSession());
+  }, []);
 
   const handleLogout = async () => {
     try {
