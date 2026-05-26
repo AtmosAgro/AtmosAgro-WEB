@@ -9,6 +9,7 @@ import { AlertCircle, Save } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
+import * as turf from "@turf/turf";
 
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
@@ -190,26 +191,28 @@ export default function NewPropertyPage() {
                                     )}
                                 />
 
-                                {/* Total Area */}
+                                {/* Total Area (auto-calculada do polígono) */}
                                 <FormField
                                     control={form.control}
                                     name="area"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel className="text-sm font-medium text-gray-700">Área Total (ha) *</FormLabel>
+                                            <FormLabel className="text-sm font-medium text-gray-700">Área Total (ha)</FormLabel>
                                             <FormControl>
                                                 <div className="relative">
                                                     <Input
                                                         type="number"
                                                         step="0.01"
-                                                        placeholder="0.00"
-                                                        className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                                        placeholder="Desenhe a área no mapa abaixo"
+                                                        readOnly
+                                                        className="bg-slate-50 text-slate-700 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                                                         {...field}
                                                         value={field.value ?? ""}
                                                     />
                                                     <span className="absolute right-3 top-2.5 text-sm text-gray-400 font-medium">ha</span>
                                                 </div>
                                             </FormControl>
+                                            <p className="mt-1 text-xs text-slate-500">Calculada automaticamente a partir do polígono desenhado no mapa.</p>
                                             <FormMessage />
                                         </FormItem>
                                     )}
@@ -320,7 +323,20 @@ export default function NewPropertyPage() {
                                     <FormItem>
                                         <FormControl>
                                             <PropertyMapSelector
-                                                onBoundaryChange={(geojson) => field.onChange(geojson)}
+                                                onBoundaryChange={(geojson) => {
+                                                    field.onChange(geojson);
+                                                    if (geojson) {
+                                                        try {
+                                                            const areaSqMeters = turf.area(geojson as any);
+                                                            const areaHectares = Number((areaSqMeters / 10000).toFixed(2));
+                                                            form.setValue("area", areaHectares, { shouldValidate: true });
+                                                        } catch (e) {
+                                                            console.error("Erro ao calcular área:", e);
+                                                        }
+                                                    } else {
+                                                        form.setValue("area", 0, { shouldValidate: false });
+                                                    }
+                                                }}
                                                 className="w-full"
                                             />
                                         </FormControl>
