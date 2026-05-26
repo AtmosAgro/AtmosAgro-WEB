@@ -37,6 +37,9 @@ import {
 } from "@/services/artefatos";
 import { createJob, getJob, JobResponse } from "@/services/jobs";
 import { dataCache } from "@/services/dataCache";
+import { SceneDatePicker } from "./SceneDatePicker";
+import { useAvailableScenes } from "@/hooks/useAvailableScenes";
+import { describeJobError, type ProcessOverrides } from "@/lib/jobErrors";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -319,6 +322,9 @@ export default function InteractiveMap() {
 
     // Filtro de data — uma única data
     const [selectedDate, setSelectedDate] = useState("");
+
+    // Mês visível no calendário (controla a janela do useAvailableScenes)
+    const [visibleMonth, setVisibleMonth] = useState<Date>(() => new Date());
 
     // Job de processamento
     const [activeJob, setActiveJob] = useState<JobResponse | null>(null);
@@ -656,6 +662,8 @@ export default function InteractiveMap() {
                 setIsLoadingArtefatos(false);
             }
         }
+        // Reset estado de job ao trocar propriedade — evita exibir erro/progresso da propriedade anterior
+        setActiveJob(null);
         fetchArtefatos();
         // Limpa TIFF ativo ao trocar de propriedade
         clearTiff();
@@ -680,6 +688,24 @@ export default function InteractiveMap() {
         return set;
     }, [filteredArtefatos]);
 
+    // Conjunto de datas (ISO YYYY-MM-DD) com cena processada para a propriedade selecionada
+    const availableDates = useMemo(() => {
+        const set = new Set<string>();
+        for (const a of artefatos) {
+            const iso = a.dataReferencia?.slice(0, 10);
+            if (iso) set.add(iso);
+        }
+        return set;
+    }, [artefatos]);
+
+    // Datas em que o Sentinel-2 tem cena disponível (catálogo Copernicus, todas as nuvens)
+    const {
+        downloadableLow,
+        downloadablePartial,
+        downloadableCloudy,
+        downloadableUnknown,
+    } = useAvailableScenes(selectedPropertyId || null, visibleMonth);
+
     const hasDateFilter = !!selectedDate;
     const noImagesInPeriod = hasDateFilter && filteredArtefatos.length === 0;
 
@@ -702,6 +728,7 @@ export default function InteractiveMap() {
     // Polling do job ativo
     useEffect(() => {
         if (!activeJob || activeJob.status === "succeeded" || activeJob.status === "failed") return;
+        const previousArtefatoIds = new Set(artefatos.map((a) => a.id));
         const interval = setInterval(async () => {
             try {
                 const updated = await getJob(activeJob.id);
@@ -711,6 +738,14 @@ export default function InteractiveMap() {
                     if (selectedPropertyId) {
                         const data = await listArtefatosByPropriedade(selectedPropertyId);
                         setArtefatos(data);
+                        // Se a cena nova traz data diferente da selecionada (±7d), ajusta selectedDate
+                        const newArtefatos = data.filter((a) => !previousArtefatoIds.has(a.id));
+                        const newIso = newArtefatos
+                            .map((a) => a.dataReferencia?.slice(0, 10))
+                            .find((iso): iso is string => !!iso && iso !== selectedDate);
+                        if (newIso) {
+                            setSelectedDate(newIso);
+                        }
                     }
                 }
             } catch {
@@ -718,23 +753,21 @@ export default function InteractiveMap() {
             }
         }, 5000);
         return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeJob, selectedPropertyId]);
 
-    const handleSolicitarProcessamento = async () => {
+    const handleSolicitarProcessamento = async (overrides?: ProcessOverrides) => {
         if (!selectedPropertyId || !selectedDate) return;
         setIsCreatingJob(true);
         try {
-            // Sentinel-2 tem revisita de ~5 dias; buscamos ±7 dias ao redor da data escolhida
-            const base = new Date(selectedDate + "T00:00:00");
-            const start = new Date(base);
-            start.setDate(start.getDate() - 7);
-            const end = new Date(base);
-            end.setDate(end.getDate() + 7);
-            const toIso = (d: Date) => d.toISOString().slice(0, 10);
+            // O calendário (AT-24) já mostra exatamente quais datas têm cena.
+            // Mandamos janela de 1 dia — Core processa só a cena daquela data,
+            // ou falha com "No Sentinel-2 product found" (tratado por describeJobError).
             const job = await createJob(
                 selectedPropertyId,
-                { start: toIso(start), end: toIso(end) },
-                DEFAULT_JOB_INDICES
+                { start: selectedDate, end: selectedDate },
+                DEFAULT_JOB_INDICES,
+                overrides?.cloudCoverMax,
             );
             setActiveJob(job);
         } catch {
@@ -742,6 +775,11 @@ export default function InteractiveMap() {
         } finally {
             setIsCreatingJob(false);
         }
+    };
+
+    const handleRequestNewDate = (iso: string) => {
+        setSelectedDate(iso);
+        setActiveJob(null);
     };
 
     // Helper to extract polygon positions from GeoJSON
@@ -1122,36 +1160,33 @@ export default function InteractiveMap() {
                             )}
                         </button>
                         {openMenu === "calendar" && (
-                            <div className="absolute bottom-14 left-0 w-72 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_16px_30px_rgba(0,0,0,0.18)]">
+                            <div className="absolute bottom-14 left-0 w-80 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_16px_30px_rgba(0,0,0,0.18)]">
                                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-3">
                                     Data da imagem
                                 </p>
 
-                                <div className="mb-3 space-y-1.5">
-                                    <div className="flex items-center gap-1 text-[10px] text-slate-400">
-                                        <Calendar className="h-3 w-3" />
-                                        <span>Selecione a data</span>
-                                    </div>
-                                    <input
-                                        type="date"
-                                        value={selectedDate}
-                                        onChange={(e) => setSelectedDate(e.target.value)}
-                                        className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-1 focus:ring-emerald-400"
-                                    />
-                                </div>
+                                <SceneDatePicker
+                                    availableDates={availableDates}
+                                    downloadableLow={downloadableLow}
+                                    downloadablePartial={downloadablePartial}
+                                    downloadableCloudy={downloadableCloudy}
+                                    downloadableUnknown={downloadableUnknown}
+                                    selectedDate={selectedDate}
+                                    onSelect={setSelectedDate}
+                                    onRequestNewDate={handleRequestNewDate}
+                                    onMonthChange={setVisibleMonth}
+                                />
 
                                 {/* Estado 1: data com imagens disponíveis */}
                                 {hasDateFilter && filteredArtefatos.length > 0 && (
-                                    <p className="text-[10px] text-slate-400 mt-2">
+                                    <p className="text-[10px] text-slate-400 mt-3">
                                         {filteredArtefatos.length} {filteredArtefatos.length === 1 ? "índice processado" : "índices processados"} para esta data. Selecione um em <span className="font-semibold">Camadas</span> para visualizar.
                                     </p>
                                 )}
 
                                 {/* Estado 2: data sem imagens — CTA processar / status do job */}
                                 {noImagesInPeriod && (
-                                    <div className="flex flex-col items-center gap-2 py-2 text-center">
-                                        <Scan className="h-4 w-4 text-slate-300" />
-                                        <p className="text-xs text-slate-400">Nenhuma imagem processada para esta data</p>
+                                    <div className="mt-3 flex flex-col items-stretch gap-2 border-t border-slate-100 pt-3 text-center">
                                         {activeJob && (activeJob.status === "pending" || activeJob.status === "running") ? (
                                             <div className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 w-full justify-center">
                                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1159,31 +1194,53 @@ export default function InteractiveMap() {
                                                     {activeJob.status === "pending" ? "Na fila..." : "Processando..."}
                                                 </span>
                                             </div>
-                                        ) : activeJob?.status === "failed" ? (
-                                            <div className="w-full space-y-1.5">
-                                                <p className="text-[10px] text-red-400">Falhou: {activeJob.erroMensagem}</p>
+                                        ) : activeJob?.status === "failed" ? (() => {
+                                            const described = describeJobError(activeJob.erroMensagem);
+                                            return (
+                                                <div className="w-full space-y-2 text-left">
+                                                    <div className="rounded-lg bg-red-50 px-3 py-2">
+                                                        <p className="text-xs font-semibold text-red-700">{described.title}</p>
+                                                        <p className="mt-1 text-[11px] text-red-600">{described.suggestion}</p>
+                                                    </div>
+                                                    {described.quickAction && (
+                                                        <button
+                                                            onClick={() => handleSolicitarProcessamento(described.quickAction!.payload)}
+                                                            disabled={isCreatingJob}
+                                                            className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-50"
+                                                        >
+                                                            {isCreatingJob ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                                                            {described.quickAction.label}
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => handleSolicitarProcessamento()}
+                                                        disabled={isCreatingJob}
+                                                        className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:opacity-50"
+                                                    >
+                                                        <RefreshCw className="h-3 w-3" />
+                                                        Tentar novamente
+                                                    </button>
+                                                </div>
+                                            );
+                                        })() : (
+                                            <>
+                                                <div className="flex items-center justify-center gap-1.5 text-xs text-slate-500">
+                                                    <Scan className="h-3.5 w-3.5 text-slate-300" />
+                                                    <span>Nenhuma cena processada nesta data</span>
+                                                </div>
                                                 <button
-                                                    onClick={handleSolicitarProcessamento}
-                                                    disabled={isCreatingJob}
-                                                    className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:opacity-50"
+                                                    onClick={() => handleSolicitarProcessamento()}
+                                                    disabled={isCreatingJob || !selectedDate}
+                                                    className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-50"
                                                 >
-                                                    <RefreshCw className="h-3 w-3" />
-                                                    Tentar novamente
+                                                    {isCreatingJob ? (
+                                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                                    ) : (
+                                                        <RefreshCw className="h-3 w-3" />
+                                                    )}
+                                                    Processar nova data
                                                 </button>
-                                            </div>
-                                        ) : (
-                                            <button
-                                                onClick={handleSolicitarProcessamento}
-                                                disabled={isCreatingJob || !selectedDate}
-                                                className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-600 disabled:opacity-50"
-                                            >
-                                                {isCreatingJob ? (
-                                                    <Loader2 className="h-3 w-3 animate-spin" />
-                                                ) : (
-                                                    <RefreshCw className="h-3 w-3" />
-                                                )}
-                                                Iniciar processamento
-                                            </button>
+                                            </>
                                         )}
                                     </div>
                                 )}
