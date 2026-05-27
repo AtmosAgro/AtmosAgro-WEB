@@ -38,7 +38,10 @@ import {
 import { createJob, getJob, JobResponse } from "@/services/jobs";
 import { dataCache } from "@/services/dataCache";
 import { SceneDatePicker } from "./SceneDatePicker";
+import { ProcessedScenesList } from "./ProcessedScenesList";
+import { BatchProcessModal } from "./BatchProcessModal";
 import { useAvailableScenes } from "@/hooks/useAvailableScenes";
+import { useActiveJobs } from "@/hooks/useActiveJobs";
 import { describeJobError, type ProcessOverrides } from "@/lib/jobErrors";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
@@ -706,6 +709,13 @@ export default function InteractiveMap() {
         downloadableUnknown,
     } = useAvailableScenes(selectedPropertyId || null, visibleMonth);
 
+    // Datas em processamento ativo (jobs pending/running com dateRange.start === end)
+    const { processingDates, refetch: refetchActiveJobs } = useActiveJobs(
+        selectedPropertyId || null,
+    );
+
+    const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
+
     const hasDateFilter = !!selectedDate;
     const noImagesInPeriod = hasDateFilter && filteredArtefatos.length === 0;
 
@@ -1171,11 +1181,32 @@ export default function InteractiveMap() {
                                     downloadablePartial={downloadablePartial}
                                     downloadableCloudy={downloadableCloudy}
                                     downloadableUnknown={downloadableUnknown}
+                                    processingDates={processingDates}
                                     selectedDate={selectedDate}
                                     onSelect={setSelectedDate}
                                     onRequestNewDate={handleRequestNewDate}
                                     onMonthChange={setVisibleMonth}
                                 />
+
+                                <ProcessedScenesList
+                                    dates={availableDates}
+                                    selectedDate={selectedDate}
+                                    onDateClick={(iso) => {
+                                        setSelectedDate(iso);
+                                        // Pula o calendário pro mês daquela data
+                                        setVisibleMonth(new Date(`${iso}T12:00:00Z`));
+                                    }}
+                                />
+
+                                {selectedPropertyId && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsBatchModalOpen(true)}
+                                        className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                                    >
+                                        Processar em lote
+                                    </button>
+                                )}
 
                                 {/* Estado 1: data com imagens disponíveis */}
                                 {hasDateFilter && filteredArtefatos.length > 0 && (
@@ -1369,6 +1400,15 @@ export default function InteractiveMap() {
                     </div>
                 )}
             </div>
+
+            {selectedPropertyId && (
+                <BatchProcessModal
+                    open={isBatchModalOpen}
+                    onOpenChange={setIsBatchModalOpen}
+                    propriedadeId={selectedPropertyId}
+                    onBatchCreated={() => refetchActiveJobs()}
+                />
+            )}
         </div >
     );
 }

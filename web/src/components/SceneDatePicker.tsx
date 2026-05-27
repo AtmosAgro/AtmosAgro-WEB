@@ -24,6 +24,7 @@ export type SceneDatePickerProps = {
   downloadablePartial?: Set<string>;
   downloadableCloudy?: Set<string>;
   downloadableUnknown?: Set<string>;
+  processingDates?: Set<string>;
   selectedDate: string;
   onSelect: (date: string) => void;
   onRequestNewDate: (date: string) => void;
@@ -36,6 +37,7 @@ export function SceneDatePicker({
   downloadablePartial,
   downloadableCloudy,
   downloadableUnknown,
+  processingDates,
   selectedDate,
   onSelect,
   onRequestNewDate,
@@ -53,25 +55,45 @@ export function SceneDatePicker({
 
   const modifiers = useMemo(
     () => ({
-      available: (date: Date) => availableDates.has(toIso(date)),
+      // Processing tem prioridade visual sobre todos os outros estados.
+      processing: (date: Date) => !!processingDates?.has(toIso(date)),
+      available: (date: Date) => {
+        const iso = toIso(date);
+        return availableDates.has(iso) && !processingDates?.has(iso);
+      },
       cloudLow: (date: Date) => {
         const iso = toIso(date);
-        return !!downloadableLow?.has(iso) && !availableDates.has(iso);
+        return (
+          !!downloadableLow?.has(iso) && !availableDates.has(iso) && !processingDates?.has(iso)
+        );
       },
       cloudPartial: (date: Date) => {
         const iso = toIso(date);
-        return !!downloadablePartial?.has(iso) && !availableDates.has(iso);
+        return (
+          !!downloadablePartial?.has(iso) && !availableDates.has(iso) && !processingDates?.has(iso)
+        );
       },
       cloudHigh: (date: Date) => {
         const iso = toIso(date);
-        return !!downloadableCloudy?.has(iso) && !availableDates.has(iso);
+        return (
+          !!downloadableCloudy?.has(iso) && !availableDates.has(iso) && !processingDates?.has(iso)
+        );
       },
       cloudUnknown: (date: Date) => {
         const iso = toIso(date);
-        return !!downloadableUnknown?.has(iso) && !availableDates.has(iso);
+        return (
+          !!downloadableUnknown?.has(iso) && !availableDates.has(iso) && !processingDates?.has(iso)
+        );
       },
     }),
-    [availableDates, downloadableLow, downloadablePartial, downloadableCloudy, downloadableUnknown],
+    [
+      availableDates,
+      downloadableLow,
+      downloadablePartial,
+      downloadableCloudy,
+      downloadableUnknown,
+      processingDates,
+    ],
   );
 
   const handleSelect = (date: Date | undefined) => {
@@ -102,6 +124,7 @@ export function SceneDatePicker({
           cloudPartial: `${dotBase} [&>button]:text-amber-700 [&>button]:after:bg-amber-500`,
           cloudHigh: `${dotBase} [&>button]:text-red-700 [&>button]:after:bg-red-500`,
           cloudUnknown: `${dotBase} [&>button]:text-slate-600 [&>button]:after:bg-slate-300`,
+          processing: `${dotBase} [&>button]:text-orange-700 [&>button]:after:bg-orange-500 [&>button]:after:animate-pulse [&>button]:after:h-1.5 [&>button]:after:w-1.5`,
         }}
         className="rounded-lg border border-slate-200 bg-white p-2"
       />
@@ -123,15 +146,20 @@ export function SceneDatePicker({
             )}
           </>
         )}
+        {processingDates && processingDates.size > 0 && (
+          <LegendItem color="bg-orange-500" label="Em processamento" pulse />
+        )}
       </div>
     </div>
   );
 }
 
-function LegendItem({ color, label }: { color: string; label: string }) {
+function LegendItem({ color, label, pulse }: { color: string; label: string; pulse?: boolean }) {
   return (
     <div className="flex items-center gap-1.5">
-      <span className={`inline-block h-1.5 w-1.5 rounded-full ${color}`} />
+      <span
+        className={`inline-block h-1.5 w-1.5 rounded-full ${color} ${pulse ? "animate-pulse" : ""}`}
+      />
       <span>{label}</span>
     </div>
   );
