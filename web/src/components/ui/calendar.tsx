@@ -11,13 +11,13 @@ function Calendar({ className, classNames, showOutsideDays = true, ...props }: C
   return (
     <DayPicker
       showOutsideDays={showOutsideDays}
-      className={cn("p-3", className)}
+      className={cn("relative p-3", className)}
       classNames={{
         months: "flex flex-col sm:flex-row gap-4",
-        month: "flex flex-col gap-4",
-        month_caption: "flex justify-center pt-1 relative items-center",
+        month: "relative flex flex-col gap-4",
+        month_caption: "flex justify-center pt-1 items-center",
         caption_label: "text-sm font-medium",
-        nav: "flex items-center justify-between absolute inset-x-1 top-1",
+        nav: "flex items-center justify-between absolute inset-x-1 top-1 z-10",
         button_previous: cn(
           buttonVariants({ variant: "outline" }),
           "h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100",
@@ -40,7 +40,8 @@ function Calendar({ className, classNames, showOutsideDays = true, ...props }: C
         range_middle: "aria-selected:bg-accent aria-selected:text-accent-foreground",
         selected:
           "[&>button]:bg-primary [&>button]:text-primary-foreground [&>button]:hover:bg-primary [&>button]:hover:text-primary-foreground [&>button]:focus:bg-primary [&>button]:focus:text-primary-foreground",
-        today: "[&>button]:bg-accent [&>button]:text-accent-foreground",
+        today:
+          "[&>button]:ring-1 [&>button]:ring-emerald-500 [&>button]:ring-inset [&>button]:font-semibold",
         outside: "day-outside text-muted-foreground opacity-50",
         disabled: "text-muted-foreground opacity-50",
         hidden: "invisible",

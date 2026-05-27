@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Permite o Next dev server aceitar HMR de tunnels (ngrok, etc.) durante demo.
+  // Lista vazia em prod (esse campo só vale em dev).
+  allowedDevOrigins: ["*.ngrok-free.app", "*.ngrok.app", "*.ngrok.io", "*.trycloudflare.com"],
   images: {
     remotePatterns: [
       {

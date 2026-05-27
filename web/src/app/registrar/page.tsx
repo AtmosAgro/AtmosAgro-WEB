@@ -117,7 +117,7 @@ export default function Register() {
         </div>
 
         <Form {...form}>
-          <form className="space-y-5" onSubmit={form.handleSubmit(onSubmit)}>
+          <form className="space-y-5" method="post" action="#" onSubmit={form.handleSubmit(onSubmit)}>
             <FormField
               control={form.control}
               name="nome"
