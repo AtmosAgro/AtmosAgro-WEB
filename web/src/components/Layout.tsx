@@ -35,26 +35,17 @@ const mainNavItems: NavItem[] = [
 
 const navSections: NavSection[] = [
   {
-    key: "monitoramento",
-    icon: "/images/ic_monitoramento.svg",
-    label: "Monitoramento",
-    items: [
-      { label: "Analises", href: "/analises" },
-      { label: "Relatorios", href: "/relatorios" },
-    ],
-  },
-  {
     key: "propriedades",
     icon: "/images/ic_propriedades.svg",
     label: "Propriedades",
     items: [
       { label: "Gerenciar Propriedades", href: "/propriedades" },
-      { label: "Talhoes", href: "/talhoes" },
+      { label: "Talhões", href: "/talhoes" },
     ],
   },
 ];
 
-const trailingNavItems: NavItem[] = [{ icon: "/images/ic_dados_satelitais.svg", label: "Dados Satelitais", href: "/analises" }];
+const trailingNavItems: NavItem[] = [];
 
 const collapsedNavItems: NavItem[] = [
   ...mainNavItems,
@@ -67,9 +58,9 @@ const collapsedNavItems: NavItem[] = [
 ];
 
 const utilityItems = [
-  { icon: "/images/ic_documentacao.svg", label: "Documentacao" },
+  { icon: "/images/ic_documentacao.svg", label: "Documentação" },
   { icon: "/images/ic_suporte.svg", label: "Suporte" },
-  { icon: "/images/ic_configuracoes.svg", label: "Configuracoes" },
+  { icon: "/images/ic_configuracoes.svg", label: "Configurações" },
 ];
 
 export const Layout = ({ title, description, headerActions, headerBackLink, children, hideChrome }: LayoutProps) => {
@@ -349,7 +340,7 @@ export const Layout = ({ title, description, headerActions, headerBackLink, chil
             <div className="flex flex-1 flex-wrap items-center justify-end gap-3">
               {headerActions ? <div className="flex flex-wrap items-center justify-end gap-2">{headerActions}</div> : null}
               <div className="flex items-center">
-                <button type="button" className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F0F0F0]" aria-label="Notificacoes">
+                <button type="button" className="flex h-10 w-10 items-center justify-center rounded-full bg-[#F0F0F0]" aria-label="Notificações">
                   <Image src="/images/ic_notificacao.svg" alt="" width={24} height={24} className="h-6 w-6" />
                 </button>
                 <div className="mx-[15px] h-5 w-[1px] bg-[#CBCAD7]" />
