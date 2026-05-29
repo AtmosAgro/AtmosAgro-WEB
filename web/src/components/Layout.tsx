@@ -31,6 +31,7 @@ type NavSection = { key: string; icon: string; label: string; items: { label: st
 const mainNavItems: NavItem[] = [
   { icon: "/images/ic_dashboard.svg", label: "Dashboard", href: "/dashboard" },
   { icon: "/images/ic_mapa_interativo.svg", label: "Mapa Interativo", href: "/mapa-interativo" },
+  { icon: "/images/ic_monitoramento.svg", label: "Processamentos", href: "/processamentos" },
 ];
 
 const navSections: NavSection[] = [
