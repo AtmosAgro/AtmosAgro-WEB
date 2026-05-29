@@ -79,21 +79,27 @@ export function BatchProcessModal({
   const [scenes, setScenes] = useState<SceneSummary[]>([]);
   const [isFetching, setIsFetching] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   // Carrega cenas disponíveis quando o range muda
   useEffect(() => {
     if (!open || !propriedadeId || !from || !to || from > to) {
       setScenes([]);
+      setFetchError(null);
       return;
     }
     let active = true;
     setIsFetching(true);
+    setFetchError(null);
     listAvailableScenes(propriedadeId, from, to)
       .then((data) => {
         if (active) setScenes(data);
       })
-      .catch(() => {
-        if (active) setScenes([]);
+      .catch((err) => {
+        if (active) {
+          setScenes([]);
+          setFetchError(err instanceof Error ? err.message : "Erro ao carregar cenas.");
+        }
       })
       .finally(() => {
         if (active) setIsFetching(false);
@@ -212,6 +218,11 @@ export function BatchProcessModal({
               <div className="flex items-center gap-2 text-slate-600">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span>Consultando catálogo Copernicus...</span>
+              </div>
+            ) : fetchError ? (
+              <div className="flex items-start gap-2 text-red-700">
+                <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                <span>Erro ao carregar cenas: {fetchError}</span>
               </div>
             ) : estimate.count === 0 ? (
               <div className="flex items-start gap-2 text-amber-700">
